@@ -121,7 +121,18 @@ def extract_audio(video_path, audio_path):
         raise ValueError("No audio track found in the video.")
     clip.audio.write_audiofile(audio_path, logger=None)
     clip.reader.close()
-    clip.audio.reader.close_proc()
+    # MoviePy's underlying audio reader API differs across versions.
+    # Newer variants expose `close()`, while older ones may have `close_proc()`.
+    if clip.audio is not None and getattr(clip.audio, "reader", None) is not None:
+        reader = clip.audio.reader
+        try:
+            if hasattr(reader, "close_proc"):
+                reader.close_proc()
+            elif hasattr(reader, "close"):
+                reader.close()
+        except Exception:
+            # Cleanup must never fail the main processing path.
+            pass
 
 def transcribe_audio(audio_file, language=None):
     waveform, sr = preprocess_audio(audio_file)
@@ -386,8 +397,16 @@ def process_video(video_path, sample_rate=1, draw_boxes=True, save_video=False, 
     width, height = clip.size
     video_format = os.path.splitext(video_path)[1].lower()
     clip.reader.close()
-    if clip.audio is not None:
-        clip.audio.reader.close_proc()
+    if clip.audio is not None and getattr(clip.audio, "reader", None) is not None:
+        reader = clip.audio.reader
+        try:
+            if hasattr(reader, "close_proc"):
+                reader.close_proc()
+            elif hasattr(reader, "close"):
+                reader.close()
+        except Exception:
+            # Cleanup must never fail the main processing path.
+            pass
 
     logging.info("Video properties: Duration: %s, Frames: %d, FPS: %.2f, Resolution: %dx%d, Format: %s",
                  seconds_to_timestr(duration), frame_count, fps, width, height, video_format)
