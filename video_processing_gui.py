@@ -186,6 +186,62 @@ def free_gpu_memory():
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
 
+def _cuda_device_summary():
+    if not torch.cuda.is_available():
+        return "CUDA not available"
+    try:
+        idx = torch.cuda.current_device()
+        props = torch.cuda.get_device_properties(idx)
+        cap = torch.cuda.get_device_capability(idx)
+        cuda_ver = getattr(torch.version, "cuda", None)
+        return f"{props.name} (cc={cap[0]}.{cap[1]}), torch_cuda={cuda_ver}"
+    except Exception as e:
+        return f"CUDA available (details unavailable: {e})"
+
+def _get_preferred_whisper_device():
+    """
+    Choose Whisper device with an explicit override.
+
+    WHISPER_DEVICE:
+      - "cpu" forces CPU
+      - "cuda" forces CUDA (will still fall back to CPU if CUDA load fails)
+      - unset/other uses CUDA if available, else CPU
+    """
+    override = (os.environ.get("WHISPER_DEVICE") or "").strip().lower()
+    if override in {"cpu", "cuda"}:
+        return override
+    return "cuda" if torch.cuda.is_available() else "cpu"
+
+def load_whisper_model(model_name: str):
+    device = _get_preferred_whisper_device()
+    logging.info("Whisper preferred device: %s (%s)", device, _cuda_device_summary())
+
+    # First attempt on preferred device.
+    try:
+        return whisper.load_model(model_name, device=device)
+    except RuntimeError as e:
+        msg = str(e)
+        msg_l = msg.lower()
+        # Common case: PyTorch CUDA build doesn't include kernels for this GPU architecture
+        # ("no kernel image is available for execution on the device").
+        cuda_kernel_mismatch = (
+            device == "cuda"
+            and ("no kernel image" in msg_l or "cudaerror" in msg_l or "cuda error" in msg_l)
+        )
+        if cuda_kernel_mismatch:
+            logging.error(
+                "Whisper failed to initialize on CUDA (%s). Falling back to CPU. "
+                "This usually means your GPU compute capability isn't supported by your installed PyTorch/CUDA build. "
+                "Set WHISPER_DEVICE=cpu to silence this, or install a compatible torch build to use GPU.",
+                _cuda_device_summary(),
+            )
+            try:
+                free_gpu_memory()
+            except Exception:
+                pass
+            return whisper.load_model(model_name, device="cpu")
+        raise
+
 # --- Helper to describe detection position ---
 def describe_position(x_norm, y_norm):
     if x_norm < 0.33:
@@ -225,7 +281,7 @@ def get_ollama_models():
 
 # --- Global Model Loading (with GPU memory cleanup after each load) ---
 logging.info("Loading Whisper model (Large-v2)...")
-whisper_model = whisper.load_model("large-v2")
+whisper_model = load_whisper_model("large-v2")
 free_gpu_memory()
 
 logging.info("Loading PANNs audio detection model...")

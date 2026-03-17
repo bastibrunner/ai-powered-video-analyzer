@@ -83,6 +83,22 @@ import whisper
 whisper.load_model("large-v2")
 ```
 
+#### CUDA note (PyTorch “no kernel image” crash)
+If you see an error like:
+
+- `CUDA error: no kernel image is available for execution on the device`
+- `cudaErrorNoKernelImageForDevice`
+
+it means **your installed PyTorch CUDA build does not include kernels for your GPU’s compute capability** (common with older NVIDIA GPUs, or when using a newer CUDA build that dropped your architecture).
+
+This repo now **automatically falls back to CPU** for Whisper when that happens. You can also force CPU explicitly:
+
+```bash
+WHISPER_DEVICE=cpu python video_processing_gui.py
+```
+
+If you want GPU acceleration, install a **torch build compatible with your GPU + CUDA stack** (and verify `torch.cuda.is_available()` is true and that your GPU compute capability is supported by that build).
+
 #### 🔹 BLIP (Image Captioning)
 Automatically downloaded when used.
 
