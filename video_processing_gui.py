@@ -372,7 +372,16 @@ def process_video(video_path, sample_rate=1, draw_boxes=True, save_video=False, 
     # --- Video Properties ---
     clip = VideoFileClip(video_path)
     fps = clip.fps
-    frame_count = int(clip.reader.nframes)
+    # MoviePy's underlying FFMPEG reader API differs across versions.
+    # Prefer `n_frames` (newer), but keep a backward-compatible fallback.
+    frame_count = None
+    for attr in ("n_frames", "nframes"):
+        if hasattr(clip.reader, attr):
+            frame_count = int(getattr(clip.reader, attr))
+            break
+    # Last-resort fallback if the reader doesn't expose a frame count.
+    if frame_count is None:
+        frame_count = int(round(float(clip.duration) * float(fps))) if fps else 0
     duration = clip.duration
     width, height = clip.size
     video_format = os.path.splitext(video_path)[1].lower()
