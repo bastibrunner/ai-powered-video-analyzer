@@ -17,7 +17,7 @@ import whisper
 from panns_inference import AudioTagging, labels as pann_labels
 import librosa
 import soundfile as sf
-from moviepy.editor import VideoFileClip, AudioFileClip
+from moviepy import VideoFileClip, AudioFileClip
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 import threading
@@ -443,7 +443,7 @@ def process_video(video_path, sample_rate=1, draw_boxes=True, save_video=False, 
             for det in detections:
                 x1, y1, x2, y2, conf, cls = det
                 cls_int = int(cls)
-                label = CLASS_MAP.get(cls_int, f"Unknown")
+                label = CLASS_MAP.get(cls_int, "Unknown")
                 cx = (x1 + x2) / 2.0
                 cy = (y1 + y2) / 2.0
                 cx_norm = cx / width
@@ -668,10 +668,8 @@ class VideoProcessingGUI:
 
         # Use get_lang_code to extract the proper language code (e.g., "eng")
         if self.auto_lang.get():
-            transcribe_language = None
             ocr_languages = self.get_lang_code(self.primary_lang.get())
         else:
-            transcribe_language = self.get_lang_code(self.primary_lang.get())
             prim = self.get_lang_code(self.primary_lang.get())
             sec = self.get_lang_code(self.secondary_lang.get())
             ocr_languages = prim if sec == "none" else f"{prim}+{sec}"
