@@ -8,6 +8,7 @@ import logging
 import platform
 import psutil
 import numpy as np
+import sys
 from ultralytics import YOLO
 import torch
 from PIL import Image
@@ -844,7 +845,71 @@ class VideoProcessingGUI:
         messagebox.showinfo("Help", help_text)
 
 
+def main():
+    """
+    Entry point that supports both CLI (headless) and GUI usage.
+
+    - If a video path is provided as a positional CLI argument, the script runs
+      `process_video` directly without creating any GUI window. This is safe on
+      headless servers without a DISPLAY.
+    - If no video argument is provided, the Tkinter GUI is started (if possible).
+    """
+    import argparse
+
+    parser = argparse.ArgumentParser(description="AI-powered video analyzer (GUI or headless).")
+    parser.add_argument(
+        "video",
+        nargs="?",
+        help="Path to the video file. If provided, runs in headless mode without GUI.",
+    )
+    parser.add_argument(
+        "--sample-rate",
+        type=int,
+        default=32,
+        help="Process every n-th frame (default: 32).",
+    )
+    parser.add_argument(
+        "--save-video",
+        action="store_true",
+        help="Save annotated video alongside the input (default: disabled in CLI).",
+    )
+    parser.add_argument(
+        "--show-video",
+        action="store_true",
+        help="Display video frames in a window while processing (CLI).",
+    )
+    parser.add_argument(
+        "--ocr-languages",
+        default="eng",
+        help="Language code(s) for OCR/transcription (default: eng).",
+    )
+
+    args = parser.parse_args()
+
+    if args.video:
+        if not os.path.exists(args.video):
+            logging.error("Video file not found: %s", args.video)
+            sys.exit(1)
+
+        # In CLI mode we don't use the GUI-selectable summarization model;
+        # this will fall back to the default/first available model.
+        global selected_summarization_model
+        selected_summarization_model = None
+
+        process_video(
+            args.video,
+            sample_rate=args.sample_rate,
+            draw_boxes=True,
+            save_video=args.save_video,
+            show_video=args.show_video,
+            ocr_languages=args.ocr_languages,
+        )
+    else:
+        # No CLI video argument provided -> start GUI (may fail on headless systems).
+        root = tk.Tk()
+        VideoProcessingGUI(root)
+        root.mainloop()
+
+
 if __name__ == "__main__":
-    root = tk.Tk()
-    gui = VideoProcessingGUI(root)
-    root.mainloop()
+    main()
