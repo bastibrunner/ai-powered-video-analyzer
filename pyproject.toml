@@ -1,0 +1,26 @@
+[project]
+name = "ai-powered-video-analyzer"
+version = "0.1.0"
+description = "Offline video understanding pipeline (YOLO + BLIP + Whisper + PANNs) with a Tkinter GUI."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+  "librosa>=0.10.2",
+  "moviepy>=1.0.3",
+  "numpy>=1.26",
+  "ollama>=0.4.7",
+  "opencv-python>=4.10.0",
+  "openai-whisper>=20240930",
+  "panns-inference>=0.1.1",
+  "pillow>=11.0.0",
+  "psutil>=7.0.0",
+  "pytesseract>=0.3.13",
+  "soundfile>=0.13.1",
+  "torch>=2.5.0",
+  "transformers>=4.49.0",
+  "ultralytics>=8.3.0",
+]
+
+[tool.uv]
+package = false
+

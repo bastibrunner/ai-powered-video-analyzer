@@ -3,13 +3,11 @@
 
 import os
 import re
-import math
 import cv2
 import logging
 import platform
 import psutil
 import numpy as np
-from collections import defaultdict, deque
 from ultralytics import YOLO
 import torch
 from PIL import Image
@@ -19,26 +17,31 @@ import whisper
 from panns_inference import AudioTagging, labels as pann_labels
 import librosa
 import soundfile as sf
-from moviepy.editor import VideoFileClip, AudioFileClip, CompositeVideoClip
+from moviepy.editor import VideoFileClip, AudioFileClip
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 import threading
 import subprocess
 import shutil
 import warnings
-import time
-import base64
-import ollama  # Requires the ollama Python package
+
+selected_summarization_model = None
 
 # --- Dynamic Path Setup (for Dockerization / cross-platform) ---
+PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# Tesseract is a system dependency (not a Python package). We locate it dynamically to keep
+# the repo portable across macOS/Linux/Windows and containerized setups.
+_tesseract_cmd = os.environ.get("TESSERACT_CMD") or shutil.which("tesseract")
 if platform.system() == "Windows":
-    pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
-    # Set TESSDATA_PREFIX to the parent directory containing tessdata (not used anymore)
-    os.environ["TESSDATA_PREFIX"] = r"C:\Program Files\Tesseract-OCR"
-    PANN_MODEL_PATH = r"C:\Users\arash\panns_data\cnn14.pth"
-else:
-    pytesseract.pytesseract.tesseract_cmd = "/usr/bin/tesseract"
-    PANN_MODEL_PATH = "/app/models/cnn14.pth"
+    _tesseract_cmd = _tesseract_cmd or r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+    os.environ.setdefault("TESSDATA_PREFIX", r"C:\Program Files\Tesseract-OCR")
+
+if _tesseract_cmd:
+    pytesseract.pytesseract.tesseract_cmd = _tesseract_cmd
+
+# PANNs checkpoint path can be overridden via env var, otherwise we use a repo-local default.
+PANN_MODEL_PATH = os.environ.get("PANN_MODEL_PATH") or os.path.join(PROJECT_DIR, "models", "cnn14.pth")
 
 # --- Suppress extraneous warnings ---
 os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
@@ -277,7 +280,16 @@ def generate_video_description():
     if not os.path.exists(report_file):
         logging.error("Report file not found for summarization.")
         return None
-    summary = ollama_summarize_report(report_file, model=selected_summarization_model.get())
+    model = None
+    if selected_summarization_model is not None:
+        try:
+            model = selected_summarization_model.get()
+        except Exception:
+            model = None
+    if not model:
+        models = get_ollama_models()
+        model = models[0] if models else "llama3.2"
+    summary = ollama_summarize_report(report_file, model=model)
     description_file = "video_description.txt"
     try:
         with open(description_file, "w", encoding="utf-8") as f:
@@ -704,7 +716,10 @@ class VideoProcessingGUI:
         if self.annotated_video_path and os.path.exists(self.annotated_video_path):
             try:
                 if os.name == "nt":
-                    os.startfile(self.annotated_video_path)
+                    startfile = getattr(os, "startfile", None)
+                    if startfile is None:
+                        raise RuntimeError("os.startfile is unavailable on this platform.")
+                    startfile(self.annotated_video_path)
                 else:
                     subprocess.Popen(["open", self.annotated_video_path])
             except Exception as e:
@@ -716,7 +731,10 @@ class VideoProcessingGUI:
         log_path = os.path.abspath(LOG_FILE)
         try:
             if os.name == "nt":
-                os.startfile(log_path)
+                startfile = getattr(os, "startfile", None)
+                if startfile is None:
+                    raise RuntimeError("os.startfile is unavailable on this platform.")
+                startfile(log_path)
             else:
                 subprocess.Popen(["open", log_path])
         except Exception as e:
@@ -727,7 +745,10 @@ class VideoProcessingGUI:
         if os.path.exists(report_path):
             try:
                 if os.name == "nt":
-                    os.startfile(report_path)
+                    startfile = getattr(os, "startfile", None)
+                    if startfile is None:
+                        raise RuntimeError("os.startfile is unavailable on this platform.")
+                    startfile(report_path)
                 else:
                     subprocess.Popen(["open", report_path])
             except Exception as e:
@@ -740,7 +761,10 @@ class VideoProcessingGUI:
         if desc_file and os.path.exists(desc_file):
             try:
                 if os.name == "nt":
-                    os.startfile(desc_file)
+                    startfile = getattr(os, "startfile", None)
+                    if startfile is None:
+                        raise RuntimeError("os.startfile is unavailable on this platform.")
+                    startfile(desc_file)
                 else:
                     subprocess.Popen(["open", desc_file])
             except Exception as e:

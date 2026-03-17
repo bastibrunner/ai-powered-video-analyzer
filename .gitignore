@@ -1,0 +1,14 @@
+.venv/
+.mypy_cache/
+__pycache__/
+*.py[cod]
+
+# Outputs
+video_processing.log
+report.txt
+video_description.txt
+temp_audio.wav
+temp_proc_audio.wav
+annotated_temp.mp4
+*_annotated.mp4
+

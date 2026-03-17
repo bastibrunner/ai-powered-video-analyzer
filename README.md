@@ -36,14 +36,16 @@ It doesn’t just **describe what’s happening**; it **understands the video’
 ## 🚀 **Installation Guide**
 ### 1️⃣ Install Required Packages
 
-#### Using Pip:
+#### Using `uv` (recommended):
 ```bash
-pip install -r pip_requirements.txt
+uv sync
 ```
 
-#### Using Conda:
+#### Using pip:
 ```bash
-conda install --file conda_requirements.txt
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
 ```
 
 ---
@@ -98,6 +100,18 @@ Automatically downloaded when used.
 - Install **Tesseract OCR** from:  
   [Tesseract OCR](https://github.com/UB-Mannheim/tesseract/wiki)
 - Set the path in `pytesseract.pytesseract.tesseract_cmd`.
+
+### 5️⃣ System dependencies (macOS / Linux)
+- **ffmpeg**: required by MoviePy for video/audio IO.
+- **tesseract**: required by `pytesseract` (binary, not a Python package).
+
+On macOS with Homebrew:
+
+```bash
+brew install ffmpeg tesseract
+```
+
+If `tesseract` isn’t on your `PATH`, you can set `TESSERACT_CMD` (or just ensure `brew` puts it on `PATH`).
 
 ---
 
