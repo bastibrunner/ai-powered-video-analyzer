@@ -19,6 +19,7 @@ from typing import Optional
 
 import cv2
 import numpy as np
+from tqdm import tqdm
 
 
 def _scan_bar_thickness_from_edge(
@@ -107,87 +108,100 @@ def analyze(
     patience = 2
     max_scan_fraction = 0.5  # never scan more than half the frame from one edge
 
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+    pbar_total = total_frames if total_frames > 0 else None
+
     try:
-        with out.open("w", encoding="utf-8") as f:
-            frame_idx = 0
-            while True:
-                ok, frame = cap.read()
-                if not ok or frame is None:
-                    break
+        with tqdm(
+            total=pbar_total,
+            desc="Box detection",
+            unit="frame",
+            dynamic_ncols=True,
+            leave=False,
+        ) as pbar:
+            with out.open("w", encoding="utf-8") as f:
+                frame_idx = 0
+                while True:
+                    ok, frame = cap.read()
+                    if not ok or frame is None:
+                        break
 
-                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY).astype(np.float32)
-                h, w = gray.shape[:2]
+                    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY).astype(np.float32)
+                    h, w = gray.shape[:2]
 
-                # Clamp edge region so slicing stays safe for tiny frames.
-                effective_edge_cols = max(1, min(edge_cols, max(1, min(w, h) // 2)))
+                    # Clamp edge region so slicing stays safe for tiny frames.
+                    effective_edge_cols = max(
+                        1, min(edge_cols, max(1, min(w, h) // 2))
+                    )
 
-                # Per-column/per-row means of intensity.
-                col_means = gray.mean(axis=0)  # (W,)
-                row_means = gray.mean(axis=1)  # (H,)
+                    # Per-column/per-row means of intensity.
+                    col_means = gray.mean(axis=0)  # (W,)
+                    row_means = gray.mean(axis=1)  # (H,)
 
-                # Reference region stats near each edge (mean and stddev).
-                left_region = gray[:, :effective_edge_cols]
-                right_region = gray[:, max(0, w - effective_edge_cols) : w]
-                top_region = gray[:effective_edge_cols, :]
-                bottom_region = gray[max(0, h - effective_edge_cols) : h, :]
+                    # Reference region stats near each edge (mean and stddev).
+                    left_region = gray[:, :effective_edge_cols]
+                    right_region = gray[:, max(0, w - effective_edge_cols) : w]
+                    top_region = gray[:effective_edge_cols, :]
+                    bottom_region = gray[max(0, h - effective_edge_cols) : h, :]
 
-                left_ref_mean = float(left_region.mean())
-                left_ref_std = float(left_region.std())
-                right_ref_mean = float(right_region.mean())
-                right_ref_std = float(right_region.std())
-                top_ref_mean = float(top_region.mean())
-                top_ref_std = float(top_region.std())
-                bottom_ref_mean = float(bottom_region.mean())
-                bottom_ref_std = float(bottom_region.std())
+                    left_ref_mean = float(left_region.mean())
+                    left_ref_std = float(left_region.std())
+                    right_ref_mean = float(right_region.mean())
+                    right_ref_std = float(right_region.std())
+                    top_ref_mean = float(top_region.mean())
+                    top_ref_std = float(top_region.std())
+                    bottom_ref_mean = float(bottom_region.mean())
+                    bottom_ref_std = float(bottom_region.std())
 
-                max_scan_left = int(min(w // 2, max_scan_fraction * w))
-                max_scan_top = int(min(h // 2, max_scan_fraction * h))
+                    max_scan_left = int(min(w // 2, max_scan_fraction * w))
+                    max_scan_top = int(min(h // 2, max_scan_fraction * h))
 
-                left_th = _scan_bar_thickness_from_edge(
-                    col_means,
-                    left_ref_mean,
-                    left_ref_std,
-                    start_from="left",
-                    max_scan_px=max_scan_left,
-                    color_diff_threshold=color_diff_threshold,
-                    edge_uniformity_std_threshold=edge_uniformity_std_threshold,
-                    patience=patience,
-                )
-                right_th = _scan_bar_thickness_from_edge(
-                    col_means,
-                    right_ref_mean,
-                    right_ref_std,
-                    start_from="right",
-                    max_scan_px=max_scan_left,
-                    color_diff_threshold=color_diff_threshold,
-                    edge_uniformity_std_threshold=edge_uniformity_std_threshold,
-                    patience=patience,
-                )
-                top_th = _scan_bar_thickness_from_edge(
-                    row_means,
-                    top_ref_mean,
-                    top_ref_std,
-                    start_from="top",
-                    max_scan_px=max_scan_top,
-                    color_diff_threshold=color_diff_threshold,
-                    edge_uniformity_std_threshold=edge_uniformity_std_threshold,
-                    patience=patience,
-                )
-                bottom_th = _scan_bar_thickness_from_edge(
-                    row_means,
-                    bottom_ref_mean,
-                    bottom_ref_std,
-                    start_from="bottom",
-                    max_scan_px=max_scan_top,
-                    color_diff_threshold=color_diff_threshold,
-                    edge_uniformity_std_threshold=edge_uniformity_std_threshold,
-                    patience=patience,
-                )
+                    left_th = _scan_bar_thickness_from_edge(
+                        col_means,
+                        left_ref_mean,
+                        left_ref_std,
+                        start_from="left",
+                        max_scan_px=max_scan_left,
+                        color_diff_threshold=color_diff_threshold,
+                        edge_uniformity_std_threshold=edge_uniformity_std_threshold,
+                        patience=patience,
+                    )
+                    right_th = _scan_bar_thickness_from_edge(
+                        col_means,
+                        right_ref_mean,
+                        right_ref_std,
+                        start_from="right",
+                        max_scan_px=max_scan_left,
+                        color_diff_threshold=color_diff_threshold,
+                        edge_uniformity_std_threshold=edge_uniformity_std_threshold,
+                        patience=patience,
+                    )
+                    top_th = _scan_bar_thickness_from_edge(
+                        row_means,
+                        top_ref_mean,
+                        top_ref_std,
+                        start_from="top",
+                        max_scan_px=max_scan_top,
+                        color_diff_threshold=color_diff_threshold,
+                        edge_uniformity_std_threshold=edge_uniformity_std_threshold,
+                        patience=patience,
+                    )
+                    bottom_th = _scan_bar_thickness_from_edge(
+                        row_means,
+                        bottom_ref_mean,
+                        bottom_ref_std,
+                        start_from="bottom",
+                        max_scan_px=max_scan_top,
+                        color_diff_threshold=color_diff_threshold,
+                        edge_uniformity_std_threshold=edge_uniformity_std_threshold,
+                        patience=patience,
+                    )
 
-                f.write(
-                    f"Frame {frame_idx}: {left_th} {top_th} {right_th} {bottom_th}\n"
-                )
-                frame_idx += 1
+                    f.write(
+                        f"Frame {frame_idx}: {left_th} {top_th} {right_th} {bottom_th}\n"
+                    )
+                    frame_idx += 1
+                    pbar.update(1)
     finally:
         cap.release()
 
