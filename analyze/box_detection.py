@@ -15,7 +15,6 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
-from typing import Optional
 
 import cv2
 import numpy as np
@@ -42,46 +41,95 @@ def _scan_bar_thickness_from_edge(
       region at that edge.
     """
     # If the edge isn't uniform enough, we treat it as "no bar" for this side.
-    if ref_std > edge_uniformity_std_threshold:
-        return 0
-
-    adaptive_thr = max(color_diff_threshold, ref_std * 2.5 + 1.0)
-    if max_scan_px <= 0:
+    if ref_std > edge_uniformity_std_threshold or max_scan_px <= 0:
         return 0
 
     frame_len = len(means)
+    if frame_len <= 0:
+        return 0
 
+    # Build a 1D scan "inside the frame" in visit order:
+    # - left/top: outer -> inward (increasing indices)
+    # - right/bottom: outer -> inward (decreasing indices)
     if start_from in {"left", "top"}:
         start_idx = outer_idx
         end_idx = min(frame_len, outer_idx + max_scan_px)
-        indices = range(start_idx, end_idx)
+        if start_idx < 0 or start_idx >= end_idx:
+            return 0
+        scan = means[start_idx:end_idx]
     elif start_from in {"right", "bottom"}:
-        start_idx = outer_idx
-        end_idx_exclusive = max(-1, outer_idx - max_scan_px)
-        indices = range(start_idx, end_idx_exclusive, -1)
+        if outer_idx < 0 or outer_idx >= frame_len:
+            return 0
+        left_bound = max(0, outer_idx - max_scan_px + 1)
+        scan = means[left_bound : outer_idx + 1][::-1]
     else:
         raise ValueError(f"Unknown start_from={start_from!r}")
 
-    last_good_pos: Optional[int] = None
-    misses = 0
-
-    for idx in indices:
-        diff = abs(float(means[idx]) - ref_mean)
-        if diff <= adaptive_thr:
-            last_good_pos = idx
-            misses = 0
-        else:
-            misses += 1
-            if misses >= patience:
-                break
-
-    if last_good_pos is None:
+    if scan.size == 0:
         return 0
 
-    if start_from in {"left", "top"}:
-        return int(last_good_pos - outer_idx + 1)
+    adaptive_thr = max(color_diff_threshold, ref_std * 2.5 + 1.0)
 
-    return int(outer_idx - last_good_pos + 1)
+    # Vectorized "good pixel" check for the full scan.
+    # We emulate the original loop semantics where we stop after `patience`
+    # consecutive "bad" pixels.
+    ref_mean_f = np.float32(ref_mean)
+    thr_f = np.float32(adaptive_thr)
+    scan_abs_diff = np.abs(scan - ref_mean_f)
+    good = scan_abs_diff <= thr_f  # shape: (L,)
+    if not bool(np.any(good)):
+        return 0
+
+    bad = ~good
+    L = int(bad.size)
+
+    # Optimized cases for common patience values.
+    if patience <= 1:
+        # Stop at the first bad pixel (if any); last_good must be before it.
+        if not bool(np.any(bad)):
+            last_good_in_scan = int(np.nonzero(good)[0][-1])
+            return last_good_in_scan + 1
+        first_bad = int(np.nonzero(bad)[0][0])
+        if first_bad == 0:
+            return 0
+        last_good_in_scan = int(np.nonzero(good[:first_bad])[0][-1])
+        return last_good_in_scan + 1
+
+    if patience == 2:
+        # Stop when we see two consecutive bad pixels.
+        if L < 2:
+            last_good_in_scan = int(np.nonzero(good)[0][-1])
+            return last_good_in_scan + 1
+
+        pair_bad = bad[:-1] & bad[1:]
+        if not bool(np.any(pair_bad)):
+            last_good_in_scan = int(np.nonzero(good)[0][-1])
+            return last_good_in_scan + 1
+
+        run_start = int(np.nonzero(pair_bad)[0][0])  # index of first bad
+        if run_start == 0:
+            return 0
+        last_good_in_scan = int(np.nonzero(good[:run_start])[0][-1])
+        return last_good_in_scan + 1
+
+    # Generic case (rare): stop after `patience` consecutive bad pixels.
+    if L < patience:
+        last_good_in_scan = int(np.nonzero(good)[0][-1])
+        return last_good_in_scan + 1
+
+    bad_int = bad.astype(np.int8, copy=False)
+    # For each window, compute number of bad pixels in that window.
+    window_bad_sum = np.convolve(bad_int, np.ones(patience, dtype=np.int8), mode="valid")
+    run_starts = np.nonzero(window_bad_sum == patience)[0]  # first window start
+    if run_starts.size > 0:
+        run_start = int(run_starts[0])
+        if run_start == 0:
+            return 0
+        last_good_in_scan = int(np.nonzero(good[:run_start])[0][-1])
+        return last_good_in_scan + 1
+
+    last_good_in_scan = int(np.nonzero(good)[0][-1])
+    return last_good_in_scan + 1
 
 
 def _scan_multi_bar_thickness_from_edge(
@@ -217,7 +265,8 @@ def analyze(
                     if not ok or frame is None:
                         break
 
-                    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY).astype(np.float32)
+                    # Keep as uint8 to avoid 4x memory + bandwidth of float32.
+                    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
                     h, w = gray.shape[:2]
 
                     # Clamp edge region so slicing stays safe for tiny frames.
@@ -236,23 +285,41 @@ def analyze(
                     else:
                         center = gray
 
-                    center_median = float(np.median(center))
-                    center_std = float(center.std())
+                    # The skip heuristic is meant to avoid wasting work on
+                    # obviously uniform frames. Sampling keeps the heuristic fast.
+                    # (We still run the actual edge scanning on full-res frames.)
+                    stats_stride = max(1, int(round(np.sqrt((h * w) / 50000.0))))
+                    center_sample = center[::stats_stride, ::stats_stride]
+                    gray_sample = gray[::stats_stride, ::stats_stride]
+
+                    # Use float32 for the cheap arithmetic only (on sampled data).
+                    center_sample_f = center_sample.astype(np.float32, copy=False)
+                    gray_sample_f = gray_sample.astype(np.float32, copy=False)
+
+                    center_median_f = np.float32(np.median(center_sample_f))
+                    center_std = float(center_sample_f.std(dtype=np.float32))
+                    single_band_f = np.float32(single_color_band)
                     center_single_frac = float(
-                        np.mean(np.abs(center - center_median) <= single_color_band)
+                        np.mean(
+                            np.abs(center_sample_f - center_median_f) <= single_band_f,
+                            dtype=np.float32,
+                        )
                     )
 
                     # Require whole-frame single-color dominance to avoid skipping
                     # legitimately letterboxed videos with a dark (but not uniform) scene.
-                    frame_median = float(np.median(gray))
+                    frame_median_f = np.float32(np.median(gray_sample_f))
                     frame_single_frac = float(
-                        np.mean(np.abs(gray - frame_median) <= single_color_band)
+                        np.mean(
+                            np.abs(gray_sample_f - frame_median_f) <= single_band_f,
+                            dtype=np.float32,
+                        )
                     )
-                    frame_std = float(gray.std())
+                    frame_std = float(gray_sample_f.std(dtype=np.float32))
                     if (
-                        frame_single_frac >= single_color_fraction_threshold
+                        frame_single_frac >= (single_color_fraction_threshold + 0.005)
                         and (
-                            center_single_frac >= single_color_fraction_threshold
+                            center_single_frac >= (single_color_fraction_threshold + 0.005)
                             or center_std <= single_color_std_threshold
                         )
                         and frame_std <= (single_color_std_threshold * 2.0)
@@ -263,8 +330,9 @@ def analyze(
                         continue
 
                     # Per-column/per-row means of intensity.
-                    col_means = gray.mean(axis=0)  # (W,)
-                    row_means = gray.mean(axis=1)  # (H,)
+                    # Keep float32 so the scan stays on the fast path.
+                    col_means = gray.mean(axis=0, dtype=np.float32)  # (W,)
+                    row_means = gray.mean(axis=1, dtype=np.float32)  # (H,)
 
                     max_scan_left = int(min(w // 2, max_scan_fraction * w))
                     max_scan_top = int(min(h // 2, max_scan_fraction * h))
