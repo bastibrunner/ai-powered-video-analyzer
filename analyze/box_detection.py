@@ -28,6 +28,7 @@ def _scan_bar_thickness_from_edge(
     ref_std: float,
     *,
     start_from: str,
+    outer_idx: int = 0,
     max_scan_px: int,
     color_diff_threshold: float,
     edge_uniformity_std_threshold: float,
@@ -48,10 +49,16 @@ def _scan_bar_thickness_from_edge(
     if max_scan_px <= 0:
         return 0
 
+    frame_len = len(means)
+
     if start_from in {"left", "top"}:
-        indices = range(0, max_scan_px)
+        start_idx = outer_idx
+        end_idx = min(frame_len, outer_idx + max_scan_px)
+        indices = range(start_idx, end_idx)
     elif start_from in {"right", "bottom"}:
-        indices = range(len(means) - 1, len(means) - 1 - max_scan_px, -1)
+        start_idx = outer_idx
+        end_idx_exclusive = max(-1, outer_idx - max_scan_px)
+        indices = range(start_idx, end_idx_exclusive, -1)
     else:
         raise ValueError(f"Unknown start_from={start_from!r}")
 
@@ -72,10 +79,90 @@ def _scan_bar_thickness_from_edge(
         return 0
 
     if start_from in {"left", "top"}:
-        return int(last_good_pos + 1)
+        return int(last_good_pos - outer_idx + 1)
 
-    # Right/bottom scan counts inward from index len(means)-1.
-    return int((len(means) - 1) - last_good_pos + 1)
+    return int(outer_idx - last_good_pos + 1)
+
+
+def _scan_multi_bar_thickness_from_edge(
+    gray: np.ndarray,
+    means: np.ndarray,
+    *,
+    start_from: str,
+    max_scan_px_total: int,
+    edge_ref_cols: int,
+    max_segments: int,
+    color_diff_threshold: float,
+    edge_uniformity_std_threshold: float,
+    patience: int,
+) -> int:
+    """
+    Scan inward from an edge and sum the thicknesses of multiple adjacent
+    near-uniform bar segments (e.g. nested borders).
+    """
+    h, w = gray.shape[:2]
+    frame_len = len(means)
+
+    total_thickness = 0
+    offset = 0  # how far we've already moved inward from the edge
+
+    for _ in range(max_segments):
+        if offset >= max_scan_px_total:
+            break
+
+        remaining = max_scan_px_total - offset
+        if remaining <= 0:
+            break
+
+        # Reference slice for the current edge (used to estimate ref_mean/ref_std).
+        ref_slice = None
+        if start_from == "left":
+            outer_idx = offset
+            ref_slice = gray[:, offset : min(w, offset + edge_ref_cols)]
+        elif start_from == "right":
+            outer_idx = w - offset - 1
+            left = max(0, w - offset - edge_ref_cols)
+            ref_slice = gray[:, left : w - offset]
+        elif start_from == "top":
+            outer_idx = offset
+            ref_slice = gray[offset : min(h, offset + edge_ref_cols), :]
+        elif start_from == "bottom":
+            outer_idx = h - offset - 1
+            top = max(0, h - offset - edge_ref_cols)
+            ref_slice = gray[top : h - offset, :]
+        else:
+            raise ValueError(f"Unknown start_from={start_from!r}")
+
+        # If we have no pixels left to build a reference, stop.
+        if ref_slice is None or ref_slice.size == 0:
+            break
+
+        # Guard against tiny frame lengths where means and indices can mismatch.
+        if outer_idx < 0 or outer_idx >= frame_len:
+            break
+
+        ref_mean = float(ref_slice.mean())
+        ref_std = float(ref_slice.std())
+
+        seg_th = _scan_bar_thickness_from_edge(
+            means,
+            ref_mean,
+            ref_std,
+            start_from=start_from,
+            outer_idx=outer_idx,
+            max_scan_px=remaining,
+            color_diff_threshold=color_diff_threshold,
+            edge_uniformity_std_threshold=edge_uniformity_std_threshold,
+            patience=patience,
+        )
+
+        if seg_th <= 0:
+            break
+
+        total_thickness += seg_th
+        offset += seg_th
+
+    return int(total_thickness)
 
 
 def analyze(
@@ -107,6 +194,10 @@ def analyze(
     edge_uniformity_std_threshold = 25.0
     patience = 2
     max_scan_fraction = 0.5  # never scan more than half the frame from one edge
+    single_color_band = 6.0  # grayscale intensity band around median
+    single_color_fraction_threshold = 0.99  # center mostly one color -> ignore frame
+    single_color_std_threshold = 7.5  # extra guard for very flat frames
+    max_segments_per_side = 3  # avoid overfitting on complex content
 
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
     pbar_total = total_frames if total_frames > 0 else None
@@ -134,64 +225,91 @@ def analyze(
                         1, min(edge_cols, max(1, min(w, h) // 2))
                     )
 
+                    # Ignore frames where the center is essentially single-color
+                    # (e.g. black screens or solid-title cards).
+                    # This prevents the edge scanner from "discovering" a bar that
+                    # doesn't exist.
+                    margin_x = min(w // 4, max(1, int(w * 0.05)))
+                    margin_y = min(h // 4, max(1, int(h * 0.05)))
+                    if w > 2 * margin_x and h > 2 * margin_y:
+                        center = gray[margin_y : h - margin_y, margin_x : w - margin_x]
+                    else:
+                        center = gray
+
+                    center_median = float(np.median(center))
+                    center_std = float(center.std())
+                    center_single_frac = float(
+                        np.mean(np.abs(center - center_median) <= single_color_band)
+                    )
+
+                    # Require whole-frame single-color dominance to avoid skipping
+                    # legitimately letterboxed videos with a dark (but not uniform) scene.
+                    frame_median = float(np.median(gray))
+                    frame_single_frac = float(
+                        np.mean(np.abs(gray - frame_median) <= single_color_band)
+                    )
+                    frame_std = float(gray.std())
+                    if (
+                        frame_single_frac >= single_color_fraction_threshold
+                        and (
+                            center_single_frac >= single_color_fraction_threshold
+                            or center_std <= single_color_std_threshold
+                        )
+                        and frame_std <= (single_color_std_threshold * 2.0)
+                    ):
+                        f.write(f"Frame {frame_idx}: 0 0 0 0\n")
+                        frame_idx += 1
+                        pbar.update(1)
+                        continue
+
                     # Per-column/per-row means of intensity.
                     col_means = gray.mean(axis=0)  # (W,)
                     row_means = gray.mean(axis=1)  # (H,)
 
-                    # Reference region stats near each edge (mean and stddev).
-                    left_region = gray[:, :effective_edge_cols]
-                    right_region = gray[:, max(0, w - effective_edge_cols) : w]
-                    top_region = gray[:effective_edge_cols, :]
-                    bottom_region = gray[max(0, h - effective_edge_cols) : h, :]
-
-                    left_ref_mean = float(left_region.mean())
-                    left_ref_std = float(left_region.std())
-                    right_ref_mean = float(right_region.mean())
-                    right_ref_std = float(right_region.std())
-                    top_ref_mean = float(top_region.mean())
-                    top_ref_std = float(top_region.std())
-                    bottom_ref_mean = float(bottom_region.mean())
-                    bottom_ref_std = float(bottom_region.std())
-
                     max_scan_left = int(min(w // 2, max_scan_fraction * w))
                     max_scan_top = int(min(h // 2, max_scan_fraction * h))
 
-                    left_th = _scan_bar_thickness_from_edge(
+                    # Sum multiple adjacent box segments on each side.
+                    left_th = _scan_multi_bar_thickness_from_edge(
+                        gray,
                         col_means,
-                        left_ref_mean,
-                        left_ref_std,
                         start_from="left",
-                        max_scan_px=max_scan_left,
+                        max_scan_px_total=max_scan_left,
+                        edge_ref_cols=effective_edge_cols,
+                        max_segments=max_segments_per_side,
                         color_diff_threshold=color_diff_threshold,
                         edge_uniformity_std_threshold=edge_uniformity_std_threshold,
                         patience=patience,
                     )
-                    right_th = _scan_bar_thickness_from_edge(
+                    right_th = _scan_multi_bar_thickness_from_edge(
+                        gray,
                         col_means,
-                        right_ref_mean,
-                        right_ref_std,
                         start_from="right",
-                        max_scan_px=max_scan_left,
+                        max_scan_px_total=max_scan_left,
+                        edge_ref_cols=effective_edge_cols,
+                        max_segments=max_segments_per_side,
                         color_diff_threshold=color_diff_threshold,
                         edge_uniformity_std_threshold=edge_uniformity_std_threshold,
                         patience=patience,
                     )
-                    top_th = _scan_bar_thickness_from_edge(
+                    top_th = _scan_multi_bar_thickness_from_edge(
+                        gray,
                         row_means,
-                        top_ref_mean,
-                        top_ref_std,
                         start_from="top",
-                        max_scan_px=max_scan_top,
+                        max_scan_px_total=max_scan_top,
+                        edge_ref_cols=effective_edge_cols,
+                        max_segments=max_segments_per_side,
                         color_diff_threshold=color_diff_threshold,
                         edge_uniformity_std_threshold=edge_uniformity_std_threshold,
                         patience=patience,
                     )
-                    bottom_th = _scan_bar_thickness_from_edge(
+                    bottom_th = _scan_multi_bar_thickness_from_edge(
+                        gray,
                         row_means,
-                        bottom_ref_mean,
-                        bottom_ref_std,
                         start_from="bottom",
-                        max_scan_px=max_scan_top,
+                        max_scan_px_total=max_scan_top,
+                        edge_ref_cols=effective_edge_cols,
+                        max_segments=max_segments_per_side,
                         color_diff_threshold=color_diff_threshold,
                         edge_uniformity_std_threshold=edge_uniformity_std_threshold,
                         patience=patience,
